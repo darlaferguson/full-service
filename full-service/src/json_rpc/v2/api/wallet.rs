@@ -1356,9 +1356,7 @@ where
                         })
                         .collect::<Result<Vec<_>, JsonRPCError>>()?;
 
-                    sync_txos(unsynced_txos)
-                        .await
-                        .map_err(format_error)?
+                    sync_txos(unsynced_txos).await.map_err(format_error)?
                 }
             };
 
