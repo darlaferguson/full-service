@@ -22,10 +22,13 @@ use mc_account_keys::{
     AccountKey, PublicAddress, RootEntropy, RootIdentity, ViewAccountKey, CHANGE_SUBADDRESS_INDEX,
     DEFAULT_SUBADDRESS_INDEX,
 };
-use mc_core::slip10::Slip10KeyGenerator;
+use mc_core::{
+    keys::{RootSpendPublic, RootViewPrivate},
+    slip10::Slip10KeyGenerator,
+};
 use mc_crypto_digestible::{Digestible, MerlinTranscript};
 use mc_crypto_keys::{RistrettoPrivate, RistrettoPublic};
-use mc_transaction_core::{ring_signature::get_tx_out_shared_secret, TokenId};
+use mc_transaction_core::TokenId;
 use std::fmt;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash)]
@@ -229,12 +232,13 @@ pub trait AccountModel {
     /// # Returns:
     /// * Account
     fn import_view_only(
-        view_private_key: &RistrettoPrivate,
-        spend_public_key: &RistrettoPublic,
+        view_private_key: &RootViewPrivate,
+        spend_public_key: &RootSpendPublic,
         name: Option<String>,
         import_block_index: u64,
         first_block_index: Option<u64>,
         next_subaddress_index: Option<u64>,
+        managed_by_hardware_wallet: bool,
         conn: Conn,
     ) -> Result<Account, WalletDbError>;
 
@@ -527,6 +531,7 @@ impl AccountModel for Account {
             name,
             fog_enabled,
             view_only: false,
+            managed_by_hardware_wallet: false,
         };
 
         diesel::insert_into(accounts::table)
@@ -601,17 +606,19 @@ impl AccountModel for Account {
     }
 
     fn import_view_only(
-        view_private_key: &RistrettoPrivate,
-        spend_public_key: &RistrettoPublic,
+        view_private_key: &RootViewPrivate,
+        spend_public_key: &RootSpendPublic,
         name: Option<String>,
         import_block_index: u64,
         first_block_index: Option<u64>,
         next_subaddress_index: Option<u64>,
+        managed_by_hardware_wallet: bool,
         conn: Conn,
     ) -> Result<Account, WalletDbError> {
         use crate::db::schema::accounts;
 
-        let view_account_key = ViewAccountKey::new(*view_private_key, *spend_public_key);
+        let view_account_key =
+            ViewAccountKey::new(*view_private_key.as_ref(), *spend_public_key.as_ref());
         let account_id = AccountID::from(&view_account_key);
 
         if Account::get(&account_id, conn).is_ok() {
@@ -635,6 +642,7 @@ impl AccountModel for Account {
             name: &name.unwrap_or_default(),
             fog_enabled: false,
             view_only: true,
+            managed_by_hardware_wallet,
         };
 
         diesel::insert_into(accounts::table)
@@ -893,6 +901,7 @@ mod tests {
             name: "Alice's Main Account".to_string(),
             fog_enabled: false,
             view_only: false,
+            managed_by_hardware_wallet: false,
         };
         assert_eq!(expected_account, acc);
 
@@ -962,6 +971,7 @@ mod tests {
             name: "".to_string(),
             fog_enabled: false,
             view_only: false,
+            managed_by_hardware_wallet: false,
         };
         assert_eq!(expected_account_secondary, acc_secondary);
 
@@ -1131,6 +1141,7 @@ mod tests {
             name: "Alice's FOG Account".to_string(),
             fog_enabled: true,
             view_only: false,
+            managed_by_hardware_wallet: false,
         };
         assert_eq!(expected_account, acc);
     }
@@ -1185,6 +1196,7 @@ mod tests {
             name: "View Only Account".to_string(),
             fog_enabled: false,
             view_only: true,
+            managed_by_hardware_wallet: false,
         };
         assert_eq!(expected_account, account);
     }

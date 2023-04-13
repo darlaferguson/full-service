@@ -26,7 +26,8 @@ use displaydoc::Display;
 use mc_account_keys::{AccountKey, RootEntropy};
 use mc_common::logger::log;
 use mc_connection::{BlockchainConnection, UserTxConnection};
-use mc_crypto_keys::{RistrettoPrivate, RistrettoPublic};
+use mc_core::keys::{RootSpendPublic, RootViewPrivate};
+use mc_crypto_keys::RistrettoPublic;
 use mc_fog_report_validation::FogPubkeyResolver;
 use mc_ledger_db::Ledger;
 use mc_transaction_signer::types::TxoSynced;
@@ -209,11 +210,12 @@ pub trait AccountService {
     ///
     fn import_view_only_account(
         &self,
-        view_private_key: String,
-        spend_public_key: String,
+        view_private_key: &RootViewPrivate,
+        spend_public_key: &RootSpendPublic,
         name: Option<String>,
         first_block_index: Option<u64>,
         next_subaddress_index: Option<u64>,
+        managed_by_hardware_wallet: bool,
     ) -> Result<Account, AccountServiceError>;
 
     /// Re-create sync request for a view only account
@@ -469,11 +471,12 @@ where
 
     fn import_view_only_account(
         &self,
-        view_private_key: String,
-        spend_public_key: String,
+        view_private_key: &RootViewPrivate,
+        spend_public_key: &RootSpendPublic,
         name: Option<String>,
         first_block_index: Option<u64>,
         next_subaddress_index: Option<u64>,
+        managed_by_hardware_wallet: bool,
     ) -> Result<Account, AccountServiceError> {
         log::info!(
             self.logger,
@@ -482,24 +485,19 @@ where
             first_block_index,
         );
 
-        let view_private_key_hex = hex::decode(view_private_key)?;
-        let view_private_key = RistrettoPrivate::try_from(view_private_key_hex.as_slice())?;
-
-        let spend_public_key_hex = hex::decode(spend_public_key)?;
-        let spend_public_key = RistrettoPublic::try_from(spend_public_key_hex.as_slice())?;
-
-        let import_block_index = self.ledger_db.num_blocks()? - 1;
-
         let mut pooled_conn = self.get_pooled_conn()?;
         let conn = pooled_conn.deref_mut();
+        let import_block_index = self.ledger_db.num_blocks()? - 1;
+
         exclusive_transaction(conn, |conn| {
             Ok(Account::import_view_only(
-                &view_private_key,
-                &spend_public_key,
+                view_private_key,
+                spend_public_key,
                 name,
                 import_block_index,
                 first_block_index,
                 next_subaddress_index,
+                managed_by_hardware_wallet,
                 conn,
             )?)
         })
@@ -1071,6 +1069,7 @@ mod tests {
                 None,
                 None,
                 None,
+                false,
             )
             .unwrap();
 

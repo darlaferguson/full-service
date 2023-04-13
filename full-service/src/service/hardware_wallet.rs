@@ -7,6 +7,7 @@ use std::convert::TryFrom;
 use ledger_mob::{DeviceHandle, Filters, LedgerHandle, LedgerProvider, Transport};
 
 use mc_common::logger::global_log;
+use mc_core::{account::ViewAccount};
 use mc_crypto_keys::RistrettoPublic;
 use strum::Display;
 
@@ -63,6 +64,11 @@ async fn get_device_handle() -> Result<DeviceHandle<LedgerHandle>, HardwareWalle
         .into();
 
     Ok(handle)
+}
+
+pub async fn get_view_only_account_keys() -> Result<ViewAccount, HardwareWalletServiceError> {
+    let device_handle = get_device_handle().await?;
+    Ok(device_handle.account_keys(0).await?)
 }
 
 pub async fn sign_tx_proposal(
