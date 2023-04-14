@@ -1064,8 +1064,8 @@ mod tests {
 
         let view_only_account = service
             .import_view_only_account(
-                hex::encode(view_account_key.view_private_key().to_bytes()),
-                hex::encode(view_account_key.spend_public_key().to_bytes()),
+                &view_account_key.view_private_key().clone().into(),
+                &view_account_key.spend_public_key().clone().into(),
                 None,
                 None,
                 None,
