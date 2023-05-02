@@ -14,6 +14,7 @@ use crate::{
     },
     json_rpc::{json_rpc_request::JsonRPCRequest, v2::api::request::JsonCommandRequest},
     service::{
+        hardware_wallet::{get_view_only_account_keys, get_view_only_subaddress_keys},
         ledger::{LedgerService, LedgerServiceError},
         WalletService,
     },
@@ -23,12 +24,19 @@ use base64;
 use bip39::{Language, Mnemonic, MnemonicType};
 use displaydoc::Display;
 
-use mc_account_keys::{AccountKey, RootEntropy};
+use mc_account_keys::{
+    AccountKey, PublicAddress, RootEntropy, ViewAccountKey, CHANGE_SUBADDRESS_INDEX,
+    DEFAULT_SUBADDRESS_INDEX,
+};
 use mc_common::logger::log;
 use mc_connection::{BlockchainConnection, UserTxConnection};
-use mc_core::keys::{RootSpendPublic, RootViewPrivate};
-use mc_crypto_keys::RistrettoPublic;
+use mc_core::{
+    account::{RingCtAddress, ViewSubaddress},
+    keys::{RootSpendPublic, RootViewPrivate},
+};
+use mc_crypto_keys::{RistrettoPrivate, RistrettoPublic};
 use mc_fog_report_validation::FogPubkeyResolver;
+use mc_fog_sig_authority::Signer;
 use mc_ledger_db::Ledger;
 use mc_transaction_signer::types::TxoSynced;
 
@@ -130,6 +138,7 @@ impl From<mc_crypto_keys::KeyError> for AccountServiceError {
 
 /// AccountService trait defining the ways in which the wallet can interact with and manage
 #[rustfmt::skip]
+#[async_trait]
 pub trait AccountService {
     /// Creates a new account with default values.
     ///
@@ -215,7 +224,15 @@ pub trait AccountService {
         name: Option<String>,
         first_block_index: Option<u64>,
         next_subaddress_index: Option<u64>,
-        managed_by_hardware_wallet: bool,
+    ) -> Result<Account, AccountServiceError>;
+
+    async fn import_view_only_account_from_hardware_wallet(
+        &self,
+        name: Option<String>,
+        first_block_index: Option<u64>,
+        fog_report_url: String,
+        fog_report_id: String,
+        fog_authority_spki: String,
     ) -> Result<Account, AccountServiceError>;
 
     /// Re-create sync request for a view only account
@@ -330,6 +347,7 @@ pub trait AccountService {
     ) -> Result<bool, AccountServiceError>;
 }
 
+#[async_trait]
 impl<T, FPR> AccountService for WalletService<T, FPR>
 where
     T: BlockchainConnection + UserTxConnection + 'static,
@@ -476,7 +494,6 @@ where
         name: Option<String>,
         first_block_index: Option<u64>,
         next_subaddress_index: Option<u64>,
-        managed_by_hardware_wallet: bool,
     ) -> Result<Account, AccountServiceError> {
         log::info!(
             self.logger,
@@ -497,7 +514,50 @@ where
                 import_block_index,
                 first_block_index,
                 next_subaddress_index,
-                managed_by_hardware_wallet,
+                false,
+                conn,
+            )?)
+        })
+    }
+
+    async fn import_view_only_account_from_hardware_wallet(
+        &self,
+        name: Option<String>,
+        first_block_index: Option<u64>,
+        fog_report_url: String,
+        fog_report_id: String,
+        fog_authority_spki: String,
+    ) -> Result<Account, AccountServiceError> {
+        let fog_authority_spki = hex::decode(fog_authority_spki).unwrap();
+
+        let view_account = get_view_only_account_keys().await.unwrap();
+        let default_subaddress_keys = get_view_only_subaddress_keys(DEFAULT_SUBADDRESS_INDEX)
+            .await
+            .unwrap();
+
+        let default_public_address = get_public_fog_address(
+            &default_subaddress_keys,
+            fog_report_url,
+            fog_report_id,
+            fog_authority_spki.as_slice(),
+        );
+
+        let view_account_keys = ViewAccountKey::new(
+            view_account.view_private_key().as_ref().clone(),
+            view_account.spend_public_key().as_ref().clone(),
+        );
+
+        let mut pooled_conn = self.get_pooled_conn()?;
+        let conn = pooled_conn.deref_mut();
+        let import_block_index = self.ledger_db.num_blocks()? - 1;
+
+        exclusive_transaction(conn, |conn| {
+            Ok(Account::import_view_only_from_hardware_wallet(
+                &view_account_keys,
+                name,
+                import_block_index,
+                first_block_index,
+                &default_public_address,
                 conn,
             )?)
         })
@@ -632,6 +692,34 @@ where
     }
 }
 
+fn get_public_fog_address(
+    subaddress_keys: &ViewSubaddress,
+    fog_report_url: String,
+    fog_report_id: String,
+    fog_authority_spki_bytes: &[u8],
+) -> PublicAddress {
+    let fog_authority_sig = {
+        let sig = subaddress_keys
+            .view_private
+            .as_ref()
+            .sign_authority(fog_authority_spki_bytes)
+            .unwrap();
+        let sig_bytes: &[u8] = sig.as_ref();
+        sig_bytes.to_vec()
+    };
+
+    let subaddress_view_public = subaddress_keys.view_public_key();
+    let subaddress_spend_public = subaddress_keys.spend_public_key();
+
+    PublicAddress::new_with_fog(
+        subaddress_spend_public.as_ref(),
+        subaddress_view_public.as_ref(),
+        fog_report_url,
+        fog_report_id,
+        fog_authority_sig,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,12 +734,55 @@ mod tests {
     };
     use mc_account_keys::{AccountKey, PublicAddress, RootIdentity, ViewAccountKey};
     use mc_common::logger::{async_test_with_logger, test_with_logger, Logger};
+    use mc_core::account::{Account, ViewAccount};
     use mc_crypto_keys::RistrettoPrivate;
     use mc_rand::RngCore;
     use mc_transaction_core::{ring_signature::KeyImage, tokens::Mob, Amount, Token};
     use mc_util_from_random::FromRandom;
     use rand::{rngs::StdRng, SeedableRng};
     use std::convert::{TryFrom, TryInto};
+
+    #[test]
+    fn test_get_public_fog_address() {
+        let mut rng: StdRng = SeedableRng::from_seed([20u8; 32]);
+
+        let view_private_key = RistrettoPrivate::from_random(&mut rng);
+        let spend_private_key = RistrettoPrivate::from_random(&mut rng);
+        let fog_report_url = "fog://fog.test.mobilecoin.com".to_string();
+        let fog_report_id: String = Default::default();
+        let fog_authority_spki = "MIICIjANBgkqhkiG9w0BAQEFAAOCAg8AMIICCgKCAgEAvnB9wTbTOT5uoizRYaYbw7XIEkInl8E7MGOAQj+xnC+F1rIXiCnc/t1+5IIWjbRGhWzo7RAwI5sRajn2sT4rRn9NXbOzZMvIqE4hmhmEzy1YQNDnfALAWNQ+WBbYGW+Vqm3IlQvAFFjVN1YYIdYhbLjAPdkgeVsWfcLDforHn6rR3QBZYZIlSBQSKRMY/tywTxeTCvK2zWcS0kbbFPtBcVth7VFFVPAZXhPi9yy1AvnldO6n7KLiupVmojlEMtv4FQkk604nal+j/dOplTATV8a9AJBbPRBZ/yQg57EG2Y2MRiHOQifJx0S5VbNyMm9bkS8TD7Goi59aCW6OT1gyeotWwLg60JRZTfyJ7lYWBSOzh0OnaCytRpSWtNZ6barPUeOnftbnJtE8rFhF7M4F66et0LI/cuvXYecwVwykovEVBKRF4HOK9GgSm17mQMtzrD7c558TbaucOWabYR04uhdAc3s10MkuONWG0wIQhgIChYVAGnFLvSpp2/aQEq3xrRSETxsixUIjsZyWWROkuA0IFnc8d7AmcnUBvRW7FT/5thWyk5agdYUGZ+7C1o69ihR1YxmoGh69fLMPIEOhYh572+3ckgl2SaV4uo9Gvkz8MMGRBcMIMlRirSwhCfozV2RyT5Wn1NgPpyc8zJL7QdOhL7Qxb+5WjnCVrQYHI2cCAwEAAQ==".as_bytes().to_vec();
+
+        let account_key = AccountKey::new_with_fog(
+            &spend_private_key,
+            &view_private_key,
+            fog_report_url.clone(),
+            fog_report_id.clone(),
+            fog_authority_spki.clone(),
+        );
+
+        let public_address_from_account_key = account_key.default_subaddress();
+        let default_subaddress_view_private = account_key.default_subaddress_view_private();
+        let default_subaddress_spend_private = account_key.default_subaddress_spend_private();
+        let default_subaddress_spend_public: RistrettoPublic =
+            (&default_subaddress_spend_private).into();
+
+        let default_view_subaddress = ViewSubaddress {
+            view_private: default_subaddress_view_private.into(),
+            spend_public: default_subaddress_spend_public.into(),
+        };
+
+        let public_address_from_view_subaddress = get_public_fog_address(
+            &default_view_subaddress,
+            fog_report_url,
+            fog_report_id,
+            fog_authority_spki.as_ref(),
+        );
+
+        assert_eq!(
+            public_address_from_account_key,
+            public_address_from_view_subaddress
+        );
+    }
 
     #[test_with_logger]
     fn test_resync_account(logger: Logger) {
@@ -1069,7 +1200,6 @@ mod tests {
                 None,
                 None,
                 None,
-                false,
             )
             .unwrap();
 
