@@ -159,6 +159,9 @@ pub enum WalletDbError {
 
     /// ed25519-dalek error
     Dalek(ed25519_dalek::ed25519::Error),
+
+    /// Ring Signature error: {0}
+    RingSignature(mc_transaction_core::ring_signature::Error),
 }
 
 impl From<diesel::result::Error> for WalletDbError {
@@ -236,5 +239,11 @@ impl From<reqwest::Error> for WalletDbError {
 impl From<ed25519_dalek::ed25519::Error> for WalletDbError {
     fn from(src: ed25519_dalek::ed25519::Error) -> Self {
         Self::Dalek(src)
+    }
+}
+
+impl From<mc_transaction_core::ring_signature::Error> for WalletDbError {
+    fn from(src: mc_transaction_core::ring_signature::Error) -> Self {
+        Self::RingSignature(src)
     }
 }
