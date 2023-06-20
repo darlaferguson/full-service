@@ -2,7 +2,7 @@
 
 //! Service for managing accounts.
 
-use std::{convert::TryFrom, ops::DerefMut};
+use std::ops::DerefMut;
 
 use crate::{
     db::{
@@ -560,7 +560,7 @@ where
                 let default_public_address = get_public_fog_address(
                     &default_subaddress_keys,
                     fog_info.report_url,
-                    fog_info.report_id,
+                    fog_info.report_id.unwrap_or_default(),
                     &fog_authority_spki,
                 );
                 exclusive_transaction(conn, |conn: &mut diesel::SqliteConnection| {
