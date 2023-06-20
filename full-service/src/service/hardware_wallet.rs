@@ -4,7 +4,7 @@
 
 use std::convert::TryFrom;
 
-use ledger_mob::{transport::GenericTransport, Connect, DeviceHandle, LedgerProvider};
+use ledger_mob::{DeviceHandle, Filters, LedgerHandle, LedgerProvider, Transport};
 
 use mc_common::logger::global_log;
 use mc_crypto_keys::RistrettoPublic;
@@ -42,27 +42,33 @@ impl From<ledger_mob::Error> for HardwareWalletServiceError {
     }
 }
 
-async fn get_device_handle() -> Result<DeviceHandle<GenericTransport>, HardwareWalletServiceError> {
-    let ledger_provider = LedgerProvider::new().unwrap();
-    let devices = ledger_provider.list_devices(ledger_mob::Filter::Hid).await;
+async fn get_device_handle() -> Result<DeviceHandle<LedgerHandle>, HardwareWalletServiceError> {
+    let mut ledger_provider = LedgerProvider::init().await;
+    let devices = ledger_provider
+        .list(Filters::Hid)
+        .await
+        .map_err(ledger_mob::Error::from)?;
 
-    if devices.is_empty() {
-        return Err(HardwareWalletServiceError::NoHardwareWalletsFound);
-    }
+    // Get the first device found, or error if none are found.
+    let device = devices
+        .first()
+        .ok_or(HardwareWalletServiceError::NoHardwareWalletsFound)?;
 
     global_log::info!("Found devices: {:04x?}", devices);
 
-    // Connect to the first device
-    //
-    // This CBB - we should iterate through each device if signing fails on the
-    // current one and more are available
-    Ok(Connect::<GenericTransport>::connect(&ledger_provider, &devices[0]).await?)
+    let handle = ledger_provider
+        .connect(device.clone())
+        .await
+        .map_err(ledger_mob::Error::from)?
+        .into();
+
+    Ok(handle)
 }
 
 pub async fn sign_tx_proposal(
     unsigned_tx_proposal: UnsignedTxProposal,
 ) -> Result<TxProposal, HardwareWalletServiceError> {
-    let device_handle = get_device_handle().await?;
+    let mut device_handle = get_device_handle().await?;
 
     global_log::debug!("Signing tx proposal with hardware device");
     let (tx, txos_synced) = device_handle

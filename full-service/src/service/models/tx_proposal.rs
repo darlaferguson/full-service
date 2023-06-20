@@ -75,7 +75,7 @@ impl UnsignedTxProposal {
         }
     }
 
-    fn sign_with_local_signer(
+    pub fn sign_with_local_signer(
         self,
         account_key: &AccountKey,
     ) -> Result<TxProposal, TransactionServiceError> {
