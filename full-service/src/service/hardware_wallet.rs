@@ -67,14 +67,14 @@ async fn get_device_handle() -> Result<DeviceHandle<LedgerHandle>, HardwareWalle
 }
 
 pub async fn get_view_only_account_keys() -> Result<ViewAccount, HardwareWalletServiceError> {
-    let device_handle = get_device_handle().await?;
+    let mut device_handle = get_device_handle().await?;
     Ok(device_handle.account_keys(0).await?)
 }
 
 pub async fn get_view_only_subaddress_keys(
     subaddress_index: u64,
 ) -> Result<ViewSubaddress, HardwareWalletServiceError> {
-    let device_handle = get_device_handle().await?;
+    let mut device_handle = get_device_handle().await?;
     Ok(device_handle.subaddress_keys(0, subaddress_index).await?)
 }
 
